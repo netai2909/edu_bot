@@ -135,5 +135,5 @@ if __name__ == '__main__':
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        webhook_url=f"https://{RAILWAY_STATIC_URL}/"
+        webhook_url="https://your-bot-name.up.railway.app"
     )
