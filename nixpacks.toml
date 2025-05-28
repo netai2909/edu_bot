@@ -1,2 +1,8 @@
 [phases.setup]
-nixPkgs = ['ffmpeg', 'libffi', 'libopus']
+nixPkgs = ["ffmpeg", "python312", "libffi", "libopus"]
+
+[phases.build]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+
+[start]
+cmd = "python edu_bot.py"
