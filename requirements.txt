@@ -1,5 +1,6 @@
-python-telegram-bot==20.3
-requests
-pydub
-SpeechRecognition
+python-telegram-bot[webhooks]
 gTTS
+pydub
+speechrecognition
+httpx
+requests
