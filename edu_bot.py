@@ -116,17 +116,25 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Webhook setup
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    # Add handlers here (CommandHandler, MessageHandler, etc.)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
+
+    # Webhook setup (no webhook_path)
+    PORT = int(os.environ.get("PORT", 8080))
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Set this in Railway as env var
+
+    await app.bot.delete_webhook()
+    await app.bot.set_webhook(url=WEBHOOK_URL)
+
+    # Run webhook
     await app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        webhook_path="/webhook"
+        port=PORT,
+        url_path="",
     )
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
