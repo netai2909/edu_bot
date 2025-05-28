@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SARVAM_KEY = os.getenv("SARVAM_KEY")
 SARVAM_SUBSCRIPTION = os.getenv("SARVAM_SUBSCRIPTION")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
