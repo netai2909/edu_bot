@@ -131,9 +131,9 @@ if __name__ == '__main__':
 
     print("🚀 Bot running on Railway (Webhook mode)...")
 
-    port = int(os.environ.get('PORT', 8443))
+    port = int(os.environ.get('PORT', 8080))
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        webhook_url="https://your-bot-name.up.railway.app"
+        webhook_url="edubot-production-9618.up.railway.app"
     )
