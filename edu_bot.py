@@ -275,7 +275,8 @@ async def main():
     app.add_handler(conv_handler)
 
     logger.info(f"Setting webhook: {WEBHOOK_URL}{WEBHOOK_PATH}")
-    await app.delete_webhook()
+
+    # Remove deleting webhook; just set webhook
     await app.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
 
     await app.run_webhook(
@@ -283,9 +284,5 @@ async def main():
         port=PORT,
         webhook_path=WEBHOOK_PATH,
     )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
