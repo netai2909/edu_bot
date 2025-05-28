@@ -1,183 +1,225 @@
 import os
+import logging
 import asyncio
 from gtts import gTTS
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 import speech_recognition as sr
 import httpx
 
-# === CONFIG ===
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-WEBHOOK_URL = "https://your-railway-app-url.com"  # Railway static URL with trailing slash
-WEBHOOK_PATH = "/webhook"  # Path Telegram calls for updates, must match railway config
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, filters,
+    ContextTypes, ConversationHandler
+)
 
-# === USER STATES ===
-user_language = {}  # user_id: "english" or "bengali"
-user_waiting_for_voice_choice = set()  # user_id waiting to say yes/no for voice reply
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# === Helper Functions ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.up.railway.app
+PORT = int(os.getenv("PORT", "8080"))
 
-def recognize_speech(file_path: str, lang_code: str) -> str:
+# States for conversation
+LANG_CHOICE, ASK_QUESTION, ASK_VOICE = range(3)
+
+# Languages keyboard
+lang_keyboard = ReplyKeyboardMarkup(
+    [["English", "Bengali"]], one_time_keyboard=True, resize_keyboard=True
+)
+
+# Voice answer keyboard
+voice_keyboard = ReplyKeyboardMarkup(
+    [["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True
+)
+
+# In-memory user data store, for demo only
+user_data_store = {}
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data_store[user_id] = {
+        "language": None,
+        "awaiting_voice_answer": False,
+        "last_answer": None,
+    }
+    await update.message.reply_text(
+        "Welcome! Please choose your language / ভাষা নির্বাচন করুন:", reply_markup=lang_keyboard
+    )
+    return LANG_CHOICE
+
+
+async def language_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.lower()
+
+    if text not in ["english", "bengali"]:
+        await update.message.reply_text(
+            "Please select 'English' or 'Bengali' / অনুগ্রহ করে 'English' অথবা 'Bengali' নির্বাচন করুন:",
+            reply_markup=lang_keyboard,
+        )
+        return LANG_CHOICE
+
+    user_data_store[user_id]["language"] = text
+    user_data_store[user_id]["awaiting_voice_answer"] = False
+    await update.message.reply_text(
+        f"You selected {text.capitalize()}. Now ask your question.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ASK_QUESTION
+
+
+async def recognize_speech(file_path, lang_code):
     r = sr.Recognizer()
     with sr.AudioFile(file_path) as source:
         audio = r.record(source)
     try:
-        if lang_code == "bengali":
-            text = r.recognize_google(audio, language="bn-BD")
-        else:
-            text = r.recognize_google(audio, language="en-US")
+        text = r.recognize_google(audio, language=lang_code)
         return text
-    except sr.UnknownValueError:
-        return ""
     except Exception as e:
-        print(f"Speech recognition error: {e}")
-        return ""
+        logger.error(f"Speech recognition failed: {e}")
+        return None
 
-async def get_english_response(prompt: str) -> str:
-    # Using a free API for English chatbot response
-    # This is an example using Huggingface Inference API (no API key needed for small demo)
+
+async def get_free_english_bot_response(question):
+    # Free API example: "https://api.affiliateplus.xyz/api/chatbot?message=your_message"
+    # If this breaks, replace with any other free chatbot API
+    url = "https://api.affiliateplus.xyz/api/chatbot"
+    params = {"message": question, "botname": "EduBot", "ownername": "You"}
     async with httpx.AsyncClient() as client:
-        payload = {"inputs": prompt}
         try:
-            resp = await client.post("https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium", json=payload, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, dict) and "error" in data:
-                    return "Sorry, I can't answer right now."
-                # The response from DialoGPT is a list with 'generated_text' in first item
-                if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-                    return data[0]["generated_text"]
-                # fallback
-                return str(data)
-            else:
-                return "Sorry, I'm having trouble understanding."
+            resp = await client.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("message", "Sorry, I could not understand.")
         except Exception as e:
-            print("English chatbot API error:", e)
-            return "Sorry, I'm having trouble answering."
+            logger.error(f"English bot API error: {e}")
+            return "Sorry, I could not process your question right now."
 
-def get_bengali_response(prompt: str) -> str:
-    # Here you should call your Sarvam LLM API for Bengali chatbot (replace with your actual code)
-    # Example dummy static reply:
-    return "আপনার প্রশ্নটি বুঝতে পারলাম, আমি শীঘ্রই উত্তর দেব।"
 
-async def send_voice(update: Update, text: str, lang_code: str):
-    filename = f"voice_{update.effective_user.id}.mp3"
+async def get_bengali_bot_response(question):
+    # Replace with your Sarvam LLM API or any Bengali chatbot API
+    # For demo, echoing back question:
+    return f"আপনি বললেন: {question}"
+
+
+async def text_to_speech(text, lang_code):
     try:
-        tts = gTTS(text=text, lang="bn" if lang_code == "bengali" else "en")
+        tts = gTTS(text=text, lang=lang_code)
+        filename = f"tts_{asyncio.current_task().get_name()}.mp3"
         tts.save(filename)
-        with open(filename, "rb") as f:
-            await update.message.reply_voice(voice=f)
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+        return filename
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        return None
 
-# === Telegram Bot Handlers ===
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Welcome! Please select your language / অনুগ্রহ করে ভাষা নির্বাচন করুন:\nType 'English' or 'Bengali'."
-    )
-
-async def language_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip().lower()
+    user_data = user_data_store.get(user_id)
 
-    if text in ["english", "bengali"]:
-        user_language[user_id] = text
+    if not user_data or not user_data.get("language"):
         await update.message.reply_text(
-            f"Language set to {text.capitalize()}. Now, send me your question (voice or text)."
+            "Please select language first using /start command.", reply_markup=lang_keyboard
         )
-    else:
-        await update.message.reply_text("Please reply with 'English' or 'Bengali' to choose your language.")
+        return LANG_CHOICE
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    language = user_data["language"]
 
-    # If language not selected, force language choice first
-    if user_id not in user_language:
-        await update.message.reply_text("Please choose your language first: English or Bengali.")
-        return
-
-    if user_id in user_waiting_for_voice_choice:
-        # Waiting for yes/no to send voice reply
-        text = update.message.text.strip().lower()
-        if text == "yes":
-            # Send voice
-            answer = context.user_data.get("last_answer", None)
-            lang = user_language[user_id]
-            if answer:
-                await send_voice(update, answer, lang)
-            else:
-                await update.message.reply_text("Sorry, no answer to convert to voice.")
-        elif text == "no":
-            await update.message.reply_text("Okay, no voice reply.")
-        else:
-            await update.message.reply_text("Please reply with 'yes' or 'no'.")
-
-        user_waiting_for_voice_choice.discard(user_id)
-        await update.message.reply_text("Please choose language for your next question: English or Bengali.")
-        user_language.pop(user_id, None)  # Force language choice again
-        return
-
-    lang = user_language[user_id]
-
-    # Detect if voice message or text
+    # Handle voice or text input
+    user_text = None
     if update.message.voice:
         # Download voice file
-        voice_file = await context.bot.get_file(update.message.voice.file_id)
-        ogg_path = f"voice_{user_id}.ogg"
-        wav_path = f"voice_{user_id}.wav"
-        await voice_file.download_to_drive(ogg_path)
-
-        # Convert ogg to wav using ffmpeg (needs ffmpeg installed in environment)
-        # Try system call, else skip recognition with error message
-        try:
-            import subprocess
-
-            subprocess.run(
-                ["ffmpeg", "-i", ogg_path, wav_path], capture_output=True, check=True
-            )
-        except Exception as e:
-            print("ffmpeg conversion error:", e)
-            await update.message.reply_text("Sorry, voice conversion failed.")
-            os.remove(ogg_path)
-            return
-
-        # Recognize speech
-        recognized_text = recognize_speech(wav_path, lang)
-        os.remove(ogg_path)
-        os.remove(wav_path)
-
-        if recognized_text == "":
+        voice_file = await update.message.voice.get_file()
+        file_path = f"voice_{user_id}.ogg"
+        await voice_file.download_to_drive(file_path)
+        lang_code = "en-US" if language == "english" else "bn-BD"
+        recognized_text = await recognize_speech(file_path, lang_code)
+        if recognized_text:
+            user_text = recognized_text
+        else:
             await update.message.reply_text(
-                "Sorry, I couldn't understand your voice clearly. Please try again."
+                "Sorry, I couldn't understand your voice. Please try again."
             )
-            return
-
-        query = recognized_text
+            return ASK_QUESTION
     else:
-        query = update.message.text.strip()
+        user_text = update.message.text
 
-    # Get answer
-    if lang == "bengali":
-        answer = get_bengali_response(query)
+    if not user_text:
+        await update.message.reply_text("Please send your question as text or voice.")
+        return ASK_QUESTION
+
+    # Get response from chatbot API
+    if language == "english":
+        bot_response = await get_free_english_bot_response(user_text)
+        tts_lang = "en"
     else:
-        answer = await get_english_response(query)
+        bot_response = await get_bengali_bot_response(user_text)
+        tts_lang = "bn"
 
-    context.user_data["last_answer"] = answer
-    await update.message.reply_text(answer)
+    # Save last answer for possible TTS
+    user_data_store[user_id]["last_answer"] = bot_response
+    user_data_store[user_id]["awaiting_voice_answer"] = True
 
-    # Ask if want voice
-    user_waiting_for_voice_choice.add(user_id)
-    await update.message.reply_text("Do you want the answer in voice? Reply 'yes' or 'no'.")
+    # Send text answer first
+    await update.message.reply_text(bot_response)
 
-# === MAIN ===
+    # Ask if want voice output
+    await update.message.reply_text(
+        "Do you want me to send the answer as voice? (Yes/No)", reply_markup=voice_keyboard
+    )
+    return ASK_VOICE
+
+
+async def handle_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = user_data_store.get(user_id)
+
+    if not user_data or not user_data.get("awaiting_voice_answer"):
+        await update.message.reply_text(
+            "Please ask a question first."
+        )
+        return ASK_QUESTION
+
+    text = update.message.text.lower()
+    if text not in ["yes", "no"]:
+        await update.message.reply_text(
+            "Please answer 'Yes' or 'No'.", reply_markup=voice_keyboard
+        )
+        return ASK_VOICE
+
+    if text == "yes":
+        last_answer = user_data.get("last_answer")
+        language = user_data.get("language")
+        tts_lang = "en" if language == "english" else "bn"
+
+        audio_file = await text_to_speech(last_answer, tts_lang)
+        if audio_file:
+            await update.message.reply_voice(voice=open(audio_file, "rb"))
+            os.remove(audio_file)
+        else:
+            await update.message.reply_text("Sorry, failed to generate voice.")
+
+    # Reset flag and ask for language again
+    user_data_store[user_id]["awaiting_voice_answer"] = False
+    await update.message.reply_text(
+        "Please choose language for next question / অনুগ্রহ করে পরবর্তী প্রশ্নের জন্য ভাষা নির্বাচন করুন:",
+        reply_markup=lang_keyboard,
+    )
+    return LANG_CHOICE
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data_store.pop(user_id, None)
+    await update.message.reply_text(
+        "Bye! To start again, send /start.", reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
 
 async def main():
     app = (
@@ -186,22 +228,32 @@ async def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^(English|Bengali|english|bengali)$"), language_choice))
-    app.add_handler(MessageHandler(filters.VOICE | filters.TEXT & ~filters.COMMAND, handle_message))
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            LANG_CHOICE: [MessageHandler(filters.Regex("^(English|Bengali)$"), language_choice)],
+            ASK_QUESTION: [MessageHandler(filters.VOICE | filters.TEXT & ~filters.COMMAND, handle_question)],
+            ASK_VOICE: [MessageHandler(filters.Regex("^(Yes|No|yes|no)$"), handle_voice_choice)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
 
-    # Webhook mode setup
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.bot.set_webhook(url=WEBHOOK_URL + WEBHOOK_PATH)
-    print("Webhook set:", WEBHOOK_URL + WEBHOOK_PATH)
+    app.add_handler(conv_handler)
 
-    # Run webhook server, listen on all interfaces and port 8080 (Railway default)
+    # Run webhook
+    logger.info(f"Setting webhook: {WEBHOOK_URL}{WEBHOOK_PATH}")
+    await app.delete_webhook()
+    await app.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
+
     await app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
+        port=PORT,
         webhook_path=WEBHOOK_PATH,
     )
 
+
 if __name__ == "__main__":
     asyncio.run(main())
+
 
