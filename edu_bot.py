@@ -1,150 +1,117 @@
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-    ConversationHandler,
-)
 import os
+import logging
+import requests
+import tempfile
 import speech_recognition as sr
 from pydub import AudioSegment
-import requests
 from gtts import gTTS
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, MessageHandler, filters,
+    CommandHandler, ContextTypes, ConversationHandler
+)
 
-# --- API KEYS ---
-TELEGRAM_TOKEN = "7747635890:AAGD7O6k5Gz9dgxQnqxf7_Zm1dmz42CWNvg"
-SARVAM_API_KEY = "sk_bvi6tcvb_gHrVVU0JHdVUqstqBsVSr4R7"
-SARVAM_SUBSCRIPTION_KEY = "7c6e940a-9bf9-4f7b-a914-8793378fd1b8"
+# Load keys from environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+SARVAM_SUBSCRIPTION_KEY = os.getenv("SARVAM_SUBSCRIPTION_KEY")
 
-# --- FOLDER SETUP ---
-os.makedirs("voice_notes", exist_ok=True)
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- STATES ---
-ASK_REPLY_TYPE = 1
+# Reply mode constants
+ASK_REPLY_TYPE, PROCESS_QUESTION = range(2)
+user_language = {}
 
-# --- GLOBAL STATE ---
-last_question = {}
+# Helper: Text-to-Speech (Bengali)
+def text_to_speech_bengali(text):
+    tts = gTTS(text=text, lang='bn')
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
+        tts.save(fp.name)
+        return fp.name
 
-# --- Sarvam Answer Function ---
-def ask_sarvam_bengali(prompt):
-    url = "https://api.sarvam.ai/v1/chat/completions"
+# Helper: Speech-to-Text
+def recognize_speech(file_path):
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(file_path) as source:
+        audio = recognizer.record(source)
+    try:
+        return recognizer.recognize_google(audio, language="bn-IN")
+    except sr.UnknownValueError:
+        return "ভয়েস বোঝা যায়নি, দয়া করে আবার বলুন।"
+
+# Sarvam Bengali API Call
+def get_bengali_response(prompt):
+    url = "https://api.sarvam.ai/v1/completions"
     headers = {
         "Authorization": f"Bearer {SARVAM_API_KEY}",
-        "Content-Type": "application/json",
-        "X-Subscription-Key": SARVAM_SUBSCRIPTION_KEY,
+        "Subscription-Key": SARVAM_SUBSCRIPTION_KEY,
+        "Content-Type": "application/json"
     }
-    data = {
+    payload = {
         "model": "sarvam-m",
-        "messages": [
-            {"role": "system", "content": "তুমি একজন বন্ধুবৎসল শিক্ষক, তুমি বাংলা ভাষায় উত্তর দেবে।"},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.7,
+        "prompt": prompt,
+        "max_tokens": 500
     }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["text"].strip()
+    else:
+        logger.error(f"Sarvam Error: {response.text}")
+        return "উত্তর পাওয়া যায়নি। পরে আবার চেষ্টা করুন।"
 
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        print(f"[Sarvam API] {response.status_code}: {response.text}")
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        else:
-            return "⚠️ সার্ভার থেকে উত্তর পাওয়া যায়নি।"
-    except Exception as e:
-        return f"❌ ত্রুটি হয়েছে: {e}"
-
-# --- Bengali TTS ---
-def text_to_bengali_voice(text, filename="bengali_reply.mp3"):
-    tts = gTTS(text=text, lang="bn")
-    tts.save(filename)
-    return filename
-
-# --- Start Command ---
+# Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 হ্যালো! প্রশ্ন করুন এবং জানিয়ে দিন কীভাবে উত্তর পেতে চান!")
+    await update.message.reply_text("👋 হ্যালো! প্রশ্ন পাঠান (ভয়েস বা টেক্সট)।")
 
-# --- Handle Text Question ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    question = update.message.text
-    last_question[user_id] = question
+    context.user_data["question"] = update.message.text
+    return await ask_reply_type(update, context)
 
-    reply_keyboard = [["🎧 Voice", "✍️ Text", "🔁 Both"]]
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    voice = await update.message.voice.get_file()
+    ogg_path = tempfile.NamedTemporaryFile(delete=False, suffix=".ogg").name
+    wav_path = ogg_path.replace(".ogg", ".wav")
+    await voice.download_to_drive(ogg_path)
+    AudioSegment.from_ogg(ogg_path).export(wav_path, format="wav")
+    question = recognize_speech(wav_path)
+    context.user_data["question"] = question
+    await update.message.reply_text(f"আপনার প্রশ্ন: {question}")
+    return await ask_reply_type(update, context)
+
+async def ask_reply_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reply_keyboard = [["Text", "Voice"]]
     await update.message.reply_text(
         "আপনি কীভাবে উত্তর পেতে চান?",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True)
     )
-    return ASK_REPLY_TYPE
+    return PROCESS_QUESTION
 
-# --- Handle Voice Question ---
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    file_id = update.message.voice.file_id
-    ogg_path = f"voice_notes/{file_id}.ogg"
-    wav_path = ogg_path.replace(".ogg", ".wav")
-
-    try:
-        file = await context.bot.get_file(file_id)
-        await file.download_to_drive(ogg_path)
-        audio = AudioSegment.from_ogg(ogg_path)
-        audio.export(wav_path, format="wav")
-
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data, language="bn-BD")
-
-        last_question[user_id] = text
-        await update.message.reply_text(f"🎙️ আপনি বললেন: {text}")
-
-        reply_keyboard = [["🎧 Voice", "✍️ Text", "🔁 Both"]]
-        await update.message.reply_text(
-            "আপনি কীভাবে উত্তর পেতে চান?",
-            reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True),
-        )
-        return ASK_REPLY_TYPE
-
-    except sr.UnknownValueError:
-        await update.message.reply_text("😕 আপনার ভয়েস বোঝা যায়নি।")
-    except Exception as e:
-        await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
-    finally:
-        if os.path.exists(ogg_path): os.remove(ogg_path)
-        if os.path.exists(wav_path): os.remove(wav_path)
-
-# --- Handle Reply Type Selection ---
-async def handle_reply_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+async def process_reply_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_type = update.message.text
-    question = last_question.get(user_id)
+    question = context.user_data.get("question", "")
+    lang = "bn" if any(ord(c) > 127 for c in question) else "en"
 
-    if not question:
-        await update.message.reply_text("❗ প্রশ্ন পাওয়া যায়নি। আবার চেষ্টা করুন।")
-        return ConversationHandler.END
-
-    answer = ask_sarvam_bengali(question)
-
-    if reply_type == "✍️ Text":
-        await update.message.reply_text(f"প্রশ্ন: {question}\n\nউত্তর: {answer}")
-    elif reply_type == "🎧 Voice":
-        voice_path = text_to_bengali_voice(answer, "bengali_voice.mp3")
-        with open(voice_path, "rb") as audio_file:
-            await update.message.reply_voice(voice=audio_file)
-        os.remove(voice_path)
-    elif reply_type == "🔁 Both":
-        await update.message.reply_text(f"প্রশ্ন: {question}\n\nউত্তর: {answer}")
-        voice_path = text_to_bengali_voice(answer, "bengali_voice.mp3")
-        with open(voice_path, "rb") as audio_file:
-            await update.message.reply_voice(voice=audio_file)
-        os.remove(voice_path)
+    if lang == "bn":
+        answer = get_bengali_response(question)
     else:
-        await update.message.reply_text("⚠️ অনুগ্রহ করে সঠিক অপশন দিন।")
+        answer = "Here's your answer (in English): [placeholder]"  # Replace with OpenAI or logic
+
+    if reply_type == "Voice":
+        audio_path = text_to_speech_bengali(answer)
+        await update.message.reply_voice(voice=open(audio_path, 'rb'))
+    else:
+        await update.message.reply_text(answer)
 
     return ConversationHandler.END
 
-# --- Main Bot Setup ---
-def main():
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ কনভার্সেশন বন্ধ করা হয়েছে।")
+    return ConversationHandler.END
+
+# Main
+if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -153,9 +120,9 @@ def main():
             MessageHandler(filters.VOICE, handle_voice)
         ],
         states={
-            ASK_REPLY_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply_type)]
+            PROCESS_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reply_choice)],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -163,6 +130,3 @@ def main():
 
     print("🤖 Bot is running...")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
