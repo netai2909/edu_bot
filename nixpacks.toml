@@ -1,4 +1,2 @@
-providers = ["python"]
-
-[start]
-cmd = "python edu_bot.py"
+[phases.setup]
+nixPkgs = ['ffmpeg', 'libffi', 'libopus']
