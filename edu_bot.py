@@ -207,14 +207,16 @@ async def main():
 
     application.add_handler(conv_handler)
 
-    logger.info(f"Setting webhook: https://{WEBHOOK_URL}{WEBHOOK_PATH}")
-    await application.bot.set_webhook(f"https://{WEBHOOK_URL}{WEBHOOK_PATH}")
+    webhook_url_full = f"https://{WEBHOOK_URL}{WEBHOOK_PATH}"
+    logger.info(f"Setting webhook: {webhook_url_full}")
+    await application.bot.set_webhook(webhook_url_full)
 
     await application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_path=WEBHOOK_PATH,
+        webhook_url=webhook_url_full,
     )
+
 
 
 if __name__ == "__main__":
